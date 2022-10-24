@@ -1,6 +1,7 @@
 import numpy as np
 import os.path as op
 from pprint import pformat
+from scipy.stats import lognorm
 # EEG utilities
 import mne
 from mne.preprocessing import ICA, create_eog_epochs
@@ -15,7 +16,7 @@ from bids import BIDSLayout
 BIDS_ROOT = 'bids_dataset'
 DERIV_ROOT = op.join(BIDS_ROOT, 'derivatives')
 HIGHPASS = 1. # low cutoff for filter
-LOWPASS = 70. # high cutoff for filter
+LOWPASS = 30. # high cutoff for filter
 TMIN = -.1
 TMAX = .5
 
@@ -44,7 +45,15 @@ for i, sub in enumerate(subjects):
     # get events of interest
     log = layout.get(subject = sub, suffix = 'events')[0].get_df()
     stim_trials = log[log.pressed_first == False]
-    stim_trials[stim_trials.rt < .6] # remove obvious outliers
+    # remove outlier trials (i.e. where stimulation failed)
+    stim_trials = stim_trials[stim_trials.rt < .6] # outside experimental bounds
+    movement_lag = stim_trials.rt - stim_trials.latency
+    params = lognorm.fit(movement_lag)
+    lower = lognorm.ppf(.025, params[0], params[1], params[2])
+    upper = lognorm.ppf(.975, params[0], params[1], params[2])
+    outlier_idx = (movement_lag > upper) | (movement_lag < lower)
+    stim_trials = stim_trials[~outlier_idx]
+    # format for MNE
     stims = (stim_trials.onset + stim_trials.latency) * raw.info['sfreq']
     stim_samples = stims.to_numpy().astype(int)
     agency = stim_trials.agency.to_numpy()
@@ -96,7 +105,7 @@ for i, sub in enumerate(subjects):
         LOWPASS + raw.info['line_freq'],
         raw.info['line_freq']
     )
-    raw = raw.notch_filter(lfs, method = 'fir')
+    raw = raw.notch_filter(lfs, method = 'fir', n_jobs = 5)
     raw, events = raw.resample(5000, events = events) # resample for PREP
 
     # run PREP pipeline (exclude bad chans, and re-reference)
@@ -104,13 +113,14 @@ for i, sub in enumerate(subjects):
     prep_params = {
         "ref_chs": "eeg",
         "reref_chs": "eeg",
-        "line_freqs": [] # we already handled line noise earlier
+        "line_freqs": [], # we already handled line noise earlier,
     }
     prep = PrepPipeline(
         raw,
         prep_params,
         raw.get_montage(),
         ransac = True,
+        filter_kwargs = dict(n_jobs = 5),
         random_state = i
     )
     prep.fit()
