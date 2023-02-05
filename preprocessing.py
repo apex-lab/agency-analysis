@@ -2,6 +2,7 @@ import numpy as np
 import os.path as op
 from pprint import pformat
 from scipy.stats import lognorm
+from itertools import product
 # EEG utilities
 import mne
 from mne.preprocessing import ICA, create_eog_epochs
@@ -16,7 +17,7 @@ from bids import BIDSLayout
 BIDS_ROOT = 'bids_dataset'
 DERIV_ROOT = op.join(BIDS_ROOT, 'derivatives')
 HIGHPASS = 1. # low cutoff for filter
-LOWPASS = 30. # high cutoff for filter
+LOWPASS = (30., 70.) # high cutoff for filter
 TMIN = -.1
 TMAX = .5
 
@@ -26,7 +27,7 @@ subjects = layout.get_subjects()
 subjects.sort()
 already_done = layout.get_subjects(scope = 'preprocessing')
 
-for i, sub in enumerate(subjects):
+for i, (sub, lowpass) in enumerate(product(subjects, LOWPASS)):
 
     if sub in already_done:
         continue # don't preprocess twice!
@@ -73,7 +74,7 @@ for i, sub in enumerate(subjects):
     # re-reference eye electrodes to become bipolar EOG
     raw.load_data()
     def reref(dat):
-        dat[1,:] = (dat[1,:] - dat[0,:]) * -1
+        dat[0,:] = (dat[1,:] - dat[0,:]) 
         return dat
     raw = raw.apply_function(
         reref,
@@ -102,10 +103,10 @@ for i, sub in enumerate(subjects):
     # and we won't create more artifact by applying an FIR filter
     lfs = np.arange(
         raw.info['line_freq'],
-        LOWPASS + raw.info['line_freq'],
+        lowpass + raw.info['line_freq'],
         raw.info['line_freq']
     )
-    raw = raw.notch_filter(lfs, method = 'fir', n_jobs = 5)
+    raw = raw.notch_filter(lfs, method = 'fir', n_jobs = -1)
     raw, events = raw.resample(5000, events = events) # resample for PREP
 
     # run PREP pipeline (exclude bad chans, and re-reference)
@@ -120,7 +121,7 @@ for i, sub in enumerate(subjects):
         prep_params,
         raw.get_montage(),
         ransac = True,
-        filter_kwargs = dict(n_jobs = 5),
+        filter_kwargs = dict(n_jobs = -1),
         random_state = i
     )
     prep.fit()
@@ -132,7 +133,7 @@ for i, sub in enumerate(subjects):
     raw.info['bads'] = [] # already interpolated by PREP
 
     # filter data
-    filt = raw.copy().filter(l_freq = HIGHPASS, h_freq = LOWPASS)
+    filt = raw.copy().filter(l_freq = HIGHPASS, h_freq = lowpass)
     # compute ICA components
     ica = ICA(n_components = 15, random_state = 0)
     ica.fit(filt, picks = 'eeg')
@@ -187,14 +188,14 @@ for i, sub in enumerate(subjects):
     # now that that's done, clean up the single-trial data
     epochs = epochs.apply_baseline((TMIN, 0.)) # baseline correct
     epochs = epochs.drop_bad(reject = thres) # and drop artifacts
-    epochs = epochs.resample(sfreq = 2 * LOWPASS)
+    epochs = epochs.resample(sfreq = 2 * lowpass)
 
     # save the cleaned data
     sink = DataSink(DERIV_ROOT, 'preprocessing')
     ev_fpath = sink.get_path(
         subject = sub,
         task = 'agencyRT',
-        desc = 'reg',
+        desc = 'reg%d'%lowpass,
         suffix = 'ave',
         extension = 'fif.gz'
     )
@@ -206,7 +207,7 @@ for i, sub in enumerate(subjects):
     fpath = sink.get_path(
         subject = sub,
         task = 'agencyRT',
-        desc = 'clean',
+        desc = 'clean%d'%lowpass,
         suffix = 'epo',
         extension = 'fif.gz'
     )
